@@ -4,8 +4,8 @@
 注意：源代码运行环境需要正确配置chromedriver，一般用户推荐使用Docker拉取latest版本进行部署。
 
 **管理界面预览：**
-![主页](https://www.songmy.top/data/image/2024/11/28/28011_bzst_3065.png)
-![功能页](https://www.songmy.top/data/image/2024/11/28/28016_mzcw_2209.png)
+![主页](img/img1.png)
+![功能页](img/img2.png)
 
 **20241128更新日志：**
 > 1.新增下载管理功能，支持transmission下载器对下载任务进行简单的管理。
