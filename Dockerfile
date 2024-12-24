@@ -6,7 +6,7 @@ WORKDIR /app
 
 # 安装 Python 依赖
 COPY requirements.txt .
-RUN pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ -r requirements.txt && rm requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt && rm requirements.txt
 
 # 复制 Python 脚本
 COPY tvshow_downloader.py .
