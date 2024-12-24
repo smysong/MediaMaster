@@ -1,5 +1,5 @@
 # 使用 Python 3.9 作为基础镜像
-FROM python:3.9-slim
+FROM python:3.14.0a3-alpine3.21
 
 # 设置工作目录
 WORKDIR /app
