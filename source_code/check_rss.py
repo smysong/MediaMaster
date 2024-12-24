@@ -16,127 +16,93 @@ def read_config(config_path):
 
 def create_miss_movies_table(cursor):
     """创建MISS_MOVIES表（如果不存在）"""
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS MISS_MOVIES (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT,
-            year INTEGER,
-            UNIQUE(title, year)
-        )
-    ''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS MISS_MOVIES (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT,
+        year INTEGER,
+        UNIQUE(title, year)
+    )''')
 
 def create_miss_tvs_table(cursor):
     """创建MISS_TVS表（如果不存在）"""
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS MISS_TVS (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT,
-            season INTEGER,
-            missing_episodes TEXT,
-            UNIQUE(title, season)
-        )
-    ''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS MISS_TVS (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT,
+        season INTEGER,
+        missing_episodes TEXT,
+        UNIQUE(title, season)
+    )''')
 
-def insert_or_replace_missing_movies(cursor):
-    """插入或替换缺失的电影到MISS_MOVIES表，并输出已存在的影片信息"""
-    cursor.execute('''
-        SELECT r.title, r.year
-        FROM RSS_MOVIES r
-        LEFT JOIN LIB_MOVIES l ON r.title = l.title AND r.year = l.year
-    ''')
-    rows = cursor.fetchall()
+def subscribe_movies(cursor):
+    """订阅电影"""
+    cursor.execute('SELECT title, year FROM RSS_MOVIES')
+    rss_movies = cursor.fetchall()
 
-    for title, year in rows:
+    for title, year in rss_movies:
         if not cursor.execute('SELECT 1 FROM LIB_MOVIES WHERE title = ? AND year = ?', (title, year)).fetchone():
-            # 检查是否已经订阅了这部电影
-            if not cursor.execute('SELECT 1 FROM MISS_MOVIES WHERE title = ? AND year = ?', (title, year)).fetchone():
-                cursor.execute('INSERT INTO MISS_MOVIES (title, year) VALUES (?, ?)', (title, year))
+            cursor.execute('INSERT OR IGNORE INTO MISS_MOVIES (title, year) VALUES (?, ?)', (title, year))
+            if cursor.rowcount > 0:
                 logger.info(f"影片：{title}（{year}) 已添加订阅！")
                 send_notification(f"影片：{title}（{year}) 已添加订阅！")
             else:
-                logger.info(f"影片：{title}（{year}) 订阅未发生变化，跳过更新！")
+                logger.warning(f"影片：{title}（{year}) 已存在于订阅列表中，跳过插入。")
         else:
             logger.info(f"影片：{title}（{year}) 已入库，无需下载订阅！")
 
-def insert_or_replace_missing_tvs(cursor):
-    """插入或替换缺失的电视剧到MISS_TVS表，并输出已存在的电视剧信息"""
-    cursor.execute('''
-        SELECT r.title, r.season, r.episode
-        FROM RSS_TVS r
-        LEFT JOIN LIB_TVS l ON r.title = l.title
-        LEFT JOIN LIB_TV_SEASONS ls ON l.id = ls.tv_id AND r.season = ls.season
-    ''')
-    rows = cursor.fetchall()
+def subscribe_tvs(cursor):
+    """订阅电视剧"""
+    cursor.execute('SELECT title, season, episode, year FROM RSS_TVS')
+    rss_tvs = cursor.fetchall()
 
-    for title, season, total_episodes in rows:
+    for title, season, total_episodes, year in rss_tvs:
         if total_episodes is None:
             logger.warning(f"电视剧：{title} 第{season}季 缺少总集数信息，跳过处理！")
             continue
 
-        total_episodes = int(total_episodes)  # 确保 total_episodes 是整数
-        if not cursor.execute('SELECT 1 FROM LIB_TVS WHERE title = ?', (title,)).fetchone():
-            # 新增订阅剧集
+        total_episodes = int(total_episodes)
+        if not cursor.execute('SELECT 1 FROM LIB_TVS WHERE title = ? AND year = ?', (title, year)).fetchone():
             missing_episodes_str = ','.join(map(str, range(1, total_episodes + 1)))
-            cursor.execute('INSERT OR REPLACE INTO MISS_TVS (title, season, missing_episodes) VALUES (?, ?, ?)', (title, season, missing_episodes_str))
-            logger.info(f"电视剧：{title} 第{season}季 已添加订阅！")
-            send_notification(f"电视剧：{title} 第{season}季 已添加订阅！")
-        elif not cursor.execute('SELECT 1 FROM LIB_TV_SEASONS WHERE tv_id = (SELECT id FROM LIB_TVS WHERE title = ?) AND season = ?', (title, season)).fetchone():
-            # 新增季数
-            missing_episodes_str = ','.join(map(str, range(1, total_episodes + 1)))
-            cursor.execute('INSERT OR REPLACE INTO MISS_TVS (title, season, missing_episodes) VALUES (?, ?, ?)', (title, season, missing_episodes_str))
-            logger.info(f"电视剧：{title} 第{season}季 已添加订阅！")
-            send_notification(f"电视剧：{title} 第{season}季 已添加订阅！")
-        else:
-            existing_episodes_str = cursor.execute('SELECT episodes FROM LIB_TV_SEASONS WHERE tv_id = (SELECT id FROM LIB_TVS WHERE title = ?) AND season = ?', (title, season)).fetchone()[0]
-            existing_episodes = set(map(int, existing_episodes_str.split(',')))
-            total_episodes_set = set(range(1, total_episodes + 1))
-            missing_episodes = total_episodes_set - existing_episodes
-
-            if missing_episodes:
-                # 更新缺失的集数
-                missing_episodes_str = ','.join(map(str, sorted(missing_episodes)))
-                cursor.execute('SELECT missing_episodes FROM MISS_TVS WHERE title = ? AND season = ?', (title, season))
-                current_missing_episodes = cursor.fetchone()
-                if current_missing_episodes:
-                    current_missing_episodes_set = set(current_missing_episodes[0].split(','))
-                    logger.debug(f"电视剧：{title} 第{season}季 当前缺失集数：{current_missing_episodes_set}")
-                    logger.debug(f"电视剧：{title} 第{season}季 新计算的缺失集数：{missing_episodes}")
-
-                    # 将集合转换为排序后的列表进行比较
-                    current_missing_episodes_list = sorted(map(int, current_missing_episodes_set))
-                    missing_episodes_list = sorted(missing_episodes)
-                    if current_missing_episodes_list != missing_episodes_list:
-                        cursor.execute('UPDATE MISS_TVS SET missing_episodes = ? WHERE title = ? AND season = ?', (missing_episodes_str, title, season))
-                        logger.info(f"电视剧：{title} 第{season}季 缺失 {missing_episodes_str} 集，已更新订阅！")
-                        send_notification(f"电视剧：{title} 第{season}季 缺失 {missing_episodes_str} 集，已更新订阅！")
-                    else:
-                        logger.info(f"电视剧：{title} 第{season}季 订阅未发生变化，跳过更新！")
-                else:
-                    logger.debug(f"电视剧：{title} 第{season}季 数据库中无当前缺失集数记录")
-                    cursor.execute('UPDATE MISS_TVS SET missing_episodes = ? WHERE title = ? AND season = ?', (missing_episodes_str, title, season))
-                    logger.info(f"电视剧：{title} 第{season}季 缺失 {missing_episodes_str} 集，已更新订阅！")
-                    send_notification(f"电视剧：{title} 第{season}季 缺失 {missing_episodes_str} 集，已更新订阅！")
+            # 检查是否已经存在于 MISS_TVS 表中
+            if not cursor.execute('SELECT 1 FROM MISS_TVS WHERE title = ? AND season = ?', (title, season)).fetchone():
+                cursor.execute('INSERT INTO MISS_TVS (title, season, missing_episodes) VALUES (?, ?, ?)', (title, season, missing_episodes_str))
+                logger.info(f"电视剧：{title} 第{season}季 已添加订阅！")
+                send_notification(f"电视剧：{title} 第{season}季 已添加订阅！")
             else:
-                logger.info(f"电视剧：{title} 第{season}季 已入库，无需下载订阅！")
+                logger.warning(f"电视剧：{title} 第{season}季 已存在于订阅列表中，跳过插入。")
+        else:
+            existing_episodes_str = cursor.execute('''
+                SELECT episodes 
+                FROM LIB_TV_SEASONS 
+                WHERE tv_id = (SELECT id FROM LIB_TVS WHERE title = ? AND year = ?) AND season = ?
+            ''', (title, year, season)).fetchone()
 
-def remove_completed_movies(cursor):
-    """检查并删除已入库的电影"""
+            if existing_episodes_str:
+                existing_episodes = set(map(int, existing_episodes_str[0].split(',')))
+                total_episodes_set = set(range(1, total_episodes + 1))
+                missing_episodes = total_episodes_set - existing_episodes
+
+                if missing_episodes:
+                    pass
+                else:
+                    logger.info(f"电视剧：{title} 第{season}季 已入库，无需下载订阅！")
+
+def update_subscriptions(cursor):
+    """检查并更新当前订阅"""
+    # 检查并删除已入库的电影
     cursor.execute('SELECT title, year FROM MISS_MOVIES')
-    rows = cursor.fetchall()
+    miss_movies = cursor.fetchall()
 
-    for title, year in rows:
+    for title, year in miss_movies:
         if cursor.execute('SELECT 1 FROM LIB_MOVIES WHERE title = ? AND year = ?', (title, year)).fetchone():
             cursor.execute('DELETE FROM MISS_MOVIES WHERE title = ? AND year = ?', (title, year))
             logger.info(f"影片：{title}（{year}) 已完成订阅！")
             send_notification(f"影片：{title}（{year}) 已完成订阅！")
 
-def remove_completed_tvs(cursor):
-    """检查并删除已完整订阅的电视剧，包括与LIB_TVS表做对比"""
-    cursor.execute('SELECT m.title, m.season, m.missing_episodes FROM MISS_TVS m')
-    rows = cursor.fetchall()
+    # 检查并删除已完整订阅的电视剧
+    cursor.execute('SELECT title, season, missing_episodes FROM MISS_TVS')
+    miss_tvs = cursor.fetchall()
 
-    for title, season, missing_episodes in rows:
-        # 获取该电视剧所有已入库的集数
+    for title, season, missing_episodes in miss_tvs:
         existing_episodes_str = cursor.execute('''
             SELECT episodes 
             FROM LIB_TV_SEASONS 
@@ -150,14 +116,20 @@ def remove_completed_tvs(cursor):
             else:
                 missing_episodes_set = set()
 
-            # 计算总集数
             total_episodes_set = existing_episodes | missing_episodes_set
 
-            # 检查是否所有的集数都已经入库
             if len(total_episodes_set) == len(existing_episodes):
                 cursor.execute('DELETE FROM MISS_TVS WHERE title = ? AND season = ?', (title, season))
                 logger.info(f"电视剧：{title} 第{season}季 已完成订阅！")
                 send_notification(f"电视剧：{title} 第{season}季 已完成订阅！")
+            else:
+                new_missing_episodes_str = ','.join(map(str, sorted(total_episodes_set - existing_episodes)))
+                if new_missing_episodes_str != missing_episodes:  # 检查是否发生变化
+                    cursor.execute('UPDATE MISS_TVS SET missing_episodes = ? WHERE title = ? AND season = ?', (new_missing_episodes_str, title, season))
+                    logger.info(f"电视剧：{title} 第{season}季 缺失 {new_missing_episodes_str} 集，已更新订阅！")
+                    send_notification(f"电视剧：{title} 第{season}季 缺失 {new_missing_episodes_str} 集，已更新订阅！")
+                else:
+                    logger.info(f"电视剧：{title} 第{season}季 订阅未发生变化！")
 
 def send_notification(title_text):
     """发送通知"""
@@ -195,17 +167,14 @@ def main():
         # 创建MISS_TVS表（如果不存在）
         create_miss_tvs_table(cursor)
 
-        # 插入或替换缺失的电影到MISS_MOVIES表，并输出已存在的影片信息
-        insert_or_replace_missing_movies(cursor)
+        # 订阅电影
+        subscribe_movies(cursor)
 
-        # 插入或替换缺失的电视剧到MISS_TVS表，并输出已存在的电视剧信息
-        insert_or_replace_missing_tvs(cursor)
+        # 订阅电视剧
+        subscribe_tvs(cursor)
 
-        # 删除已入库的电影
-        remove_completed_movies(cursor)
-
-        # 删除已完整订阅的电视剧
-        remove_completed_tvs(cursor)
+        # 更新订阅
+        update_subscriptions(cursor)
 
         # 提交事务
         conn.commit()

@@ -69,30 +69,50 @@ class DoubanAPI:
             response = requests.get(url, headers=self.pcheaders)
             response.raise_for_status()  # 检查请求是否成功
             data = response.json()
-            if data and isinstance(data, list) and len(data) > 0:
+
+            if data and isinstance(data, list):
+                if len(data) == 1:  # 如果请求返回只有一个结果，直接使用这个结果
+                    item = data[0]
+                    logger.info("请求返回只有一个结果，直接使用")
+                    return [item.get('id')] if item else []
+
+                # 初步筛选：根据 media_type 和 episode 字段
                 matches = []
                 for item in data:
-                    if media_type == 'movie':
-                        # 查找与标题和年份匹配的结果，并且 episode 为空
-                        if item.get('year') == year and title.lower() in item.get('title', '').lower() and not item.get('episode'):
-                            matches.append(item)
-                    else:
-                        # 查找与标题匹配的结果，并且 episode 不为空
-                        if title.lower() in item.get('title', '').lower() and item.get('episode'):
-                            matches.append(item)
+                    if media_type == 'movie' and not item.get('episode'):
+                        matches.append(item)
+                    elif media_type == 'tv' and item.get('episode'):
+                        matches.append(item)
 
-                if matches:
-                    logger.info(f"找到 {len(matches)} 个匹配项")
-                    # 尝试提取所有季的豆瓣 ID
-                    all_season_ids = [match.get('id') for match in matches]
-                    return all_season_ids
+                if len(matches) == 1:
+                    # 如果只有一个匹配项，直接使用这个结果
+                    logger.info("找到一个匹配项")
+                    return [matches[0].get('id')]
+                elif len(matches) > 1:
+                    # 如果有多个匹配项，选择标题相同或匹配度最高的结果，并且需要匹配年份
+                    best_match = None
+                    highest_match_score = 0
+                    for match in matches:
+                        match_score = self.calculate_match_score(title, match.get('title', ''))
+                        if match.get('year') == year and match_score > highest_match_score:
+                            highest_match_score = match_score
+                            best_match = match
+                    if best_match:
+                        logger.info("找到一个最佳匹配项")
+                        return [best_match.get('id')]
+                    else:
+                        logger.warning(f"未找到标题为 {title} 且年份为 {year} 的最佳匹配项")
                 else:
-                    logger.warning(f"未找到标题为 {title} 的豆瓣 ID")
+                    logger.warning(f"未找到标题为 {title} 的匹配项")
             else:
                 logger.warning(f"未找到标题为 {title} 的结果")
         except Exception as e:
             logger.error(f"获取豆瓣 ID 失败，标题: {title}，错误: {e}")
         return []
+
+    def calculate_match_score(self, title1: str, title2: str) -> int:
+        # 简单的匹配度计算，可以根据需要进行更复杂的实现
+        return sum(title1.lower() in part for part in title2.lower().split())
 
     def imdb_get_douban_id(self, imdb_id: str) -> str:
         url = f"https://movie.douban.com/j/subject_suggest?q={imdb_id}"

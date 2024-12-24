@@ -17,7 +17,7 @@ import requests
 app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1, x_prefix=1)
 # 定义版本号
-APP_VERSION = '1.6.3 (20241128)'
+APP_VERSION = '1.7.0 (20241224)'
 downloader = MediaDownloader()
 app.secret_key = 'mediamaster'  # 设置一个密钥，用于会话管理
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=24)  # 设置会话有效期为24小时
@@ -368,8 +368,8 @@ def api_search_movie():
     year = data.get('year')
     if not keyword:
         return jsonify({'error': '缺少关键词'}), 400
-
-    results = downloader.search_movie(keyword, year)
+    session = requests.Session()  # 确保这里创建了一个 Session 对象
+    results = downloader.search_movie(session, keyword, year)
     return jsonify(results)
 
 @app.route('/api/search_tv_show', methods=['POST'])
@@ -380,8 +380,8 @@ def api_search_tv_show():
     year = data.get('year')
     if not keyword:
         return jsonify({'error': '缺少关键词'}), 400
-
-    results = downloader.search_tv_show(keyword, year)
+    session = requests.Session()  # 确保这里创建了一个 Session 对象
+    results = downloader.search_tvshow(session, keyword, year)
     return jsonify(results)
 
 @app.route('/api/download_movie', methods=['GET'])
@@ -392,8 +392,8 @@ def api_download_movie():
     year = request.args.get('year')
     if not link or not title or not year:
         return jsonify({'error': '缺少参数'}), 400
-
-    success = downloader.download_movie(link, title, year)
+    session = requests.Session()  # 确保这里创建了一个 Session 对象
+    success = downloader.download_movie(session, link, title, year)
     if success:
         return jsonify({'success': True})
     else:
@@ -407,8 +407,8 @@ def api_download_tv_show():
     year = request.args.get('year')
     if not link or not title or not year:
         return jsonify({'error': '缺少参数'}), 400
-
-    success = downloader.download_tv_show(link, title, year)
+    session = requests.Session()  # 确保这里创建了一个 Session 对象
+    success = downloader.download_tvshow(session, link, title, year)
     if success:
         return jsonify({'success': True})
     else:
@@ -483,10 +483,8 @@ config_descriptions = {
         'exclude_keywords': '排除的关键字',
     },
     'urls': {
-        'movie_login_url': '电影登录URL',
-        'tv_login_url': '电视剧登录URL',
-        'movie_search_url': '电影搜索URL',
-        'tv_search_url': '电视剧搜索URL',
+        'movie_url': '电影站点主域名',
+        'tv_url': '电视剧站点主域名',
     },
     'running': {
         'run_interval_hours': '运行间隔（小时）',
@@ -529,7 +527,7 @@ CONFIG_FILE = '/config/config.ini'
 config = configparser.ConfigParser()
 
 # 读取配置文件
-config.read(CONFIG_FILE)
+config.read(CONFIG_FILE, encoding='utf-8')
 
 # 获取download_mgmt部分的信息
 download_mgmt = config.getboolean('download_mgmt', 'download_mgmt')

@@ -53,33 +53,44 @@ class DouBanRSSParser:
 
     def create_tables(self):
         cursor = self.db_connection.cursor()
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS RSS_MOVIES (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT,
-                douban_id TEXT UNIQUE,
-                episode TEXT,
-                year TEXT,
-                img TEXT,
-                url TEXT,
-                sub_title TEXT
-            )
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS RSS_TVS (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT,
-                douban_id TEXT UNIQUE,
-                season INTEGER DEFAULT 1,
-                episode TEXT,
-                year TEXT,
-                img TEXT,
-                url TEXT,
-                sub_title TEXT
-            )
-        ''')
+        # 检查RSS_MOVIES表是否存在
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='RSS_MOVIES';")
+        table_exists = cursor.fetchone()
+        if not table_exists:
+            cursor.execute('''
+                CREATE TABLE RSS_MOVIES (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT,
+                    douban_id TEXT UNIQUE,
+                    episode TEXT,
+                    year TEXT,
+                    img TEXT,
+                    url TEXT,
+                    sub_title TEXT
+                )
+            ''')
+            logging.info("RSS_MOVIES表已创建")
+        
+        # 检查RSS_TVS表是否存在
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='RSS_TVS';")
+        table_exists = cursor.fetchone()
+        if not table_exists:
+            cursor.execute('''
+                CREATE TABLE RSS_TVS (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT,
+                    douban_id TEXT UNIQUE,
+                    season INTEGER DEFAULT 1,
+                    episode TEXT,
+                    year TEXT,
+                    img TEXT,
+                    url TEXT,
+                    sub_title TEXT
+                )
+            ''')
+            logging.info("RSS_TVS表已创建")
+        
         self.db_connection.commit()
-        logging.info("数据库表已创建")
 
     def fetch_rss_data(self):
         headers = {
@@ -135,58 +146,61 @@ class DouBanRSSParser:
         existing_tv_ids = {row[0] for row in cursor.fetchall()}
         return existing_movie_ids.union(existing_tv_ids)
 
-    def fetch_movie_details(self, douban_id):
-        api_url = f'https://movie.douban.com/j/subject_suggest?q={douban_id}'
+    def fetch_movie_details(self, title, douban_id):
+        api_url = f'https://movie.douban.com/j/subject_suggest?q={title}'
         try:
             response = requests.get(api_url, headers=self.pcheaders, timeout=10)
             if response.status_code == 200:
                 api_data = response.json()
                 if api_data:
-                    # 假设第一个结果是最相关的
-                    movie_info = api_data[0]
-                    episode = movie_info.get('episode', '')
-                    year = movie_info.get('year', '')
-                    img = movie_info.get('img', '')
-                    title = movie_info.get('title', '')
-                    url = movie_info.get('url', '')
-                    sub_title = movie_info.get('sub_title', '')
-                    douban_id = movie_info.get('id', '')
+                    # 使用豆瓣ID匹配最佳结果
+                    for movie_info in api_data:
+                        if movie_info.get('id') == douban_id:
+                            episode = movie_info.get('episode', '')
+                            year = movie_info.get('year', '')
+                            img = movie_info.get('img', '')
+                            title = movie_info.get('title', '')
+                            url = movie_info.get('url', '')
+                            sub_title = movie_info.get('sub_title', '')
+                            douban_id = movie_info.get('id', '')
 
-                    # 判断影片类型
-                    media_type = '电影' if episode == '' else '电视剧'
+                            # 判断影片类型
+                            media_type = '电影' if episode == '' else '电视剧'
 
-                    # 提取季数
-                    season_match = re.search(r'第(\d+|零|一|二|三|四|五|六|七|八|九|十|十一|十二|十三|十四|十五|十六|十七|十八|十九|二十|二十一|二十二|二十三|二十四|二十五|二十六|二十七|二十八|二十九|三十)季', title)
-                    if season_match:
-                        season_str = season_match.group(1)
-                        if season_str.isdigit():
-                            season = int(season_str)
-                        else:
-                            season = chinese_to_int(season_str)
-                        # 去除标题中的“第X季”
-                        title = re.sub(r'第\d+季|第零季|第一季|第二季|第三季|第四季|第五季|第六季|第七季|第八季|第九季|第十季|第十一季|第十二季|第十三季|第十四季|第十五季|第十六季|第十七季|第十八季|第十九季|第二十季|第二十一季|第二十二季|第二十三季|第二十四季|第二十五季|第二十六季|第二十七季|第二十八季|第二十九季|第三十季', '', title)
-                    else:
-                        season = 1
+                            # 提取季数
+                            season_match = re.search(r'第(\d+|零|一|二|三|四|五|六|七|八|九|十|十一|十二|十三|十四|十五|十六|十七|十八|十九|二十|二十一|二十二|二十三|二十四|二十五|二十六|二十七|二十八|二十九|三十)季', title)
+                            if season_match:
+                                season_str = season_match.group(1)
+                                if season_str.isdigit():
+                                    season = int(season_str)
+                                else:
+                                    season = chinese_to_int(season_str)
+                                # 去除标题中的“第X季”
+                                title = re.sub(r'第\d+季|第零季|第一季|第二季|第三季|第四季|第五季|第六季|第七季|第八季|第九季|第十季|第十一季|第十二季|第十三季|第十四季|第十五季|第十六季|第十七季|第十八季|第十九季|第二十季|第二十一季|第二十二季|第二十三季|第二十四季|第二十五季|第二十六季|第二十七季|第二十八季|第二十九季|第三十季', '', title)
+                            else:
+                                season = 1
 
-                    # 去除标题中的多余空格
-                    title = re.sub(r'\s+', ' ', title).strip()
+                            # 去除标题中的多余空格
+                            title = re.sub(r'\s+', ' ', title).strip()
 
-                    return {
-                        'title': title,
-                        'douban_id': douban_id,
-                        'episode': episode,
-                        'year': year,
-                        'img': img,
-                        'url': url,
-                        'sub_title': sub_title,
-                        'media_type': media_type,
-                        'season': season
-                    }
-                else:
+                            return {
+                                'title': title,
+                                'douban_id': douban_id,
+                                'episode': episode,
+                                'year': year,
+                                'img': img,
+                                'url': url,
+                                'sub_title': sub_title,
+                                'media_type': media_type,
+                                'season': season
+                            }
                     logging.warning(f"未找到豆瓣ID为 {douban_id} 的信息")
                     return None
+                else:
+                    logging.warning(f"未找到标题为 {title} 的信息")
+                    return None
             else:
-                logging.error(f"获取豆瓣ID为 {douban_id} 的详细信息失败，状态码: {response.status_code}")
+                logging.error(f"获取标题为 {title} 的详细信息失败，状态码: {response.status_code}")
                 return None
         except requests.RequestException as e:
             logging.error(f"请求豆瓣API时发生错误: {e}")
@@ -246,7 +260,7 @@ class DouBanRSSParser:
                         logging.info(f"跳过已存在的项目: 豆瓣ID {douban_id}")
                         continue
 
-                    movie_details = self.fetch_movie_details(douban_id)
+                    movie_details = self.fetch_movie_details(title, douban_id)  # 使用标题和豆瓣ID获取详细信息
                     if movie_details:
                         logging.info("-" * 80)
                         logging.info(f"处理项目: {movie_details['title']}")

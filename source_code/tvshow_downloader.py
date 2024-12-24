@@ -1,459 +1,419 @@
-import sqlite3
+import requests
+from bs4 import BeautifulSoup
 import json
 import configparser
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
-import logging
 import os
-import time
-import re
-import requests
-import shutil
+import logging
+import sqlite3  # 导入 sqlite3 模块
+from typing import List, Dict, Tuple
+import re  # 导入正则表达式模块
+from urllib.parse import urljoin  # 导入用于拼接URL的函数
 
-# 配置日志
+# 配置日志功能
 logging.basicConfig(level=logging.INFO, format='%(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-DOWNLOAD_RECORD_FILE = '/config/tvshow_download_records.json'
+# 创建一个ConfigParser对象并读取配置文件
+config = configparser.ConfigParser()
+config_path = '/config/config.ini'  # 假设配置文件位于当前目录下
+if not os.path.exists(config_path):
+    logger.error(f"配置文件 {config_path} 不存在")
+    exit(1)
+config.read(config_path, encoding='utf-8')
 
-class TVDownloader:
-    def __init__(self, config_path='/config/config.ini'):
-        self.config_path = config_path
-        self.driver = None
-        self.config = {}
-        self.db_path = None  # 初始值为None，将在load_config中设置
+# 从配置文件中读取必要的配置项
+base_url = config.get("urls", "tv_url", fallback="https://www.bthdtv.com")
+login_page_url = f"{base_url}/member.php?mod=logging&action=login"
+login_url = f"{base_url}/member.php?mod=logging&action=login&loginsubmit=yes&inajax=1"
+search_url = f"{base_url}/search.php?mod=forum"
+user_profile_url = f"{base_url}/home.php?mod=space"  # 用户个人页面URL
+db_path = config.get('database', 'db_path', fallback='')
+if not db_path:
+    logger.error("配置文件中未找到数据库路径")
+    exit(1)
+username = config.get("resources", "login_username", fallback="")
+password = config.get("resources", "login_password", fallback="")
+exclude_keywords_str = config.get("resources", "exclude_keywords", fallback="")
+exclude_keywords = [kw.strip().lower() for kw in exclude_keywords_str.split(',') if kw.strip()]
+preferred_resolution = config.get("resources", "preferred_resolution", fallback="")
+fallback_resolution = config.get("resources", "fallback_resolution", fallback="")
 
-    def setup_webdriver(self):
-        options = Options()
-        options.add_argument('--headless')  # 无头模式运行
-        options.add_argument('--no-sandbox')  # 在非root用户下需要禁用沙盒
-        options.add_argument('--disable-dev-shm-usage')  # 解决/dev/shm空间不足的问题
-        options.add_argument('--window-size=1920x1080')  # 设置窗口大小
-        
-        # 设置默认下载目录
-        prefs = {
-            "download.default_directory": "/Torrent",
-            "download.prompt_for_download": False,
-            "download.directory_upgrade": True,
-            "safebrowsing.enabled": True
-        }
-        options.add_experimental_option("prefs", prefs)
+# 创建会话对象并设置默认HTTP头信息
+session = requests.Session()
+headers = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+    'Content-Type': 'application/x-www-form-urlencoded',
+    'Origin': base_url,
+    'Connection': 'keep-alive',
+    'Referer': base_url,
+    'Accept-Encoding': 'gzip, deflate, br'
+}
+session.headers.update(headers)
 
-        # 指定 chromedriver 的路径
-        service = Service(executable_path='/usr/local/bin/chromedriver')
-        
-        try:
-            self.driver = webdriver.Chrome(service=service, options=options)
-            logging.info("WebDriver初始化完成")
-        except Exception as e:
-            logging.error(f"WebDriver初始化失败: {e}")
-            raise
+class TVInfoExtractor:
+    def __init__(self, db_path, config):
+        self.db_path = db_path
+        self.config = config
 
-    def load_config(self):
-        """从INI文件中加载配置"""
-        try:
-            config = configparser.ConfigParser()
-            config.read(self.config_path, encoding='utf-8')
-            self.config = {section: dict(config.items(section)) for section in config.sections()}
-            
-            # 从配置文件中读取数据库路径
-            self.db_path = self.config.get('database', {}).get('db_path', '')
-            
-            logger.debug("加载配置文件成功")
-            return self.config
-        except FileNotFoundError:
-            logger.error(f"配置文件 {self.config_path} 不存在!")
-            exit(1)
-        except configparser.Error as e:
-            logger.error(f"配置文件解析错误: {e}")
-            exit(1)
-
-    def login(self, url, username, password):
-        self.driver.get(url)
-        try:
-            WebDriverWait(self.driver, 10).until(
-                EC.presence_of_element_located((By.NAME, "username"))
-            )
-            logger.debug("登录页面加载完成")
-            username_input = self.driver.find_element(By.NAME, 'username')
-            password_input = self.driver.find_element(By.NAME, 'password')
-            username_input.send_keys(username)
-            password_input.send_keys(password)
-            submit_button = WebDriverWait(self.driver, 10).until(
-                EC.element_to_be_clickable((By.NAME, 'loginsubmit'))
-            )
-            submit_button.click()
-            WebDriverWait(self.driver, 10).until(
-                EC.presence_of_element_located((By.PARTIAL_LINK_TEXT, '跳转'))
-            )
-            logger.info("登录成功！")
-        except TimeoutException:
-            logger.error("登录失败或页面未正确加载，未找到预期元素！")
-            self.driver.quit()
-            exit(1)
-
-    def load_download_records(self):
-        """加载已下载记录"""
-        if os.path.exists(DOWNLOAD_RECORD_FILE):
-            with open(DOWNLOAD_RECORD_FILE, 'r', encoding='utf-8') as file:
-                records = json.load(file)
-                logger.debug("加载下载记录成功")
-                return records
-        logger.info("下载记录文件不存在，创建新文件")
-        return []
-
-    def save_download_records(self, records):
-        """保存已下载记录"""
-        with open(DOWNLOAD_RECORD_FILE, 'w', encoding='utf-8') as file:
-            json.dump(records, file, ensure_ascii=False, indent=4)
-            logger.debug("保存下载记录成功")
-
-    def build_record_key(self, item, resolution, title_text):
-        # 构建记录键，使用实际的标题
-        return f"{item['剧集']}_{resolution}_{title_text}"
-
-    def extract_tv_info(self):
+    def extract_tv_info(self) -> List[Dict[str, str]]:
         """从数据库读取缺失的电视节目信息"""
         all_tv_info = []
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute('SELECT title, missing_episodes FROM MISS_TVS')
-            tvs = cursor.fetchall()
-            
-            for title, missing_episodes_str in tvs:
-                missing_episodes = [int(ep.strip()) for ep in missing_episodes_str.split(',') if ep.strip()]
-                if missing_episodes:
-                    min_episode_num = min(missing_episodes)
+        try:
+            with sqlite3.connect(self.db_path) as conn:  # 使用 sqlite3 连接数据库
+                cursor = conn.cursor()
+                cursor.execute('SELECT title, missing_episodes FROM MISS_TVS')
+                tvs = cursor.fetchall()
+
+                for title, missing_episodes_str in tvs:
+                    missing_episodes = [int(ep.strip()) for ep in missing_episodes_str.split(',') if ep.strip()]
+                    min_episode_num = min(missing_episodes) if missing_episodes else 1
                     formatted_episode_number = f'{"0" if min_episode_num < 10 else ""}{min_episode_num}'
-                else:
-                    formatted_episode_number = '01'  # 如果无缺失集数信息，则认为是从第01集开始缺失
-                resolution = self.config.get("resources", {}).get("preferred_resolution", "")
-                all_tv_info.append({
-                    "剧集": title,
-                    "分辨率": resolution,
-                    "集数": formatted_episode_number
-                })
-        logger.debug("读取缺失的电视节目信息完成")
+                    
+                    resolution = self.config.get("resources", "preferred_resolution", fallback="")
+                    all_tv_info.append({
+                        "剧集": title,
+                        "分辨率": resolution,
+                        "集数": formatted_episode_number,
+                        "missing_episodes": missing_episodes  # 添加缺失的集数列表
+                    })
+        except sqlite3.Error as e:
+            logger.error(f"数据库操作失败: {e}")
+            exit(1)
+
         return all_tv_info
 
-    def find_episode_links(self, list_items, item, resolution):
-        found_links = []
-        exclude_keywords = self.config.get("resources", {}).get("exclude_keywords", "")
-        exclude_keywords = [keyword.strip() for keyword in exclude_keywords.split(',')]
-        
-        for li in list_items:
-            try:
-                a_element = li.find_element(By.TAG_NAME, 'a')
-                title_text = a_element.text.lower()
-
-                # 检查是否需要排除此条目
-                if any(keyword in title_text for keyword in exclude_keywords):
-                    continue
-
-                # 匹配集数范围
-                range_match = f"[第{item['集数']}-" in title_text
-                # 匹配精确集数
-                exact_match = f"[第{item['集数']}集]" in title_text
-                if resolution.lower() in title_text and (exact_match or range_match):
-                    link = a_element.get_attribute('href')
-                    found_links.append((link, title_text))
-                    logger.info(f"发现: {title_text}, Link: {link}")
-            except NoSuchElementException:
-                logger.warning("未找到搜索结果元素")
-                continue
-        return found_links
-
-    def find_full_set_resource(self, resolution, download_records, item):
-        list_items = self.driver.find_elements(By.TAG_NAME, 'li')
-        for li in list_items:
-            try:
-                a_element = li.find_element(By.TAG_NAME, 'a')
-                title_text = a_element.text.lower()
-
-                # 获取排除关键字列表
-                exclude_keywords = self.config.get("resources", {}).get("exclude_keywords", "")
-                exclude_keywords = [keyword.strip() for keyword in exclude_keywords.split(',')]
-                
-                # 检查是否需要排除此条目
-                if any(keyword in title_text for keyword in exclude_keywords):
-                    continue
-                
-                # 匹配全集，并且包含分辨率
-                if '全' in title_text and any(char.isdigit() for char in title_text) and resolution.lower() in title_text:
-                    link = a_element.get_attribute('href')
-                    logger.info(f"发现全集资源: {title_text}, Link: {link}")
-                    self.handle_full_set(link, item, resolution, download_records)
-                    return True
-            except NoSuchElementException:
-                logger.warning("未找到搜索结果元素")
-                continue
+def load_and_check_cookies(session, user_profile_url):
+    """加载并检查现有的cookies"""
+    if os.path.exists('/tmp/tvshow_cookies.json'):
+        with open('/tmp/tvshow_cookies.json', 'r') as file:
+            cookies_dict = json.load(file)
+            session.cookies.update(cookies_dict)
+            response = session.get(user_profile_url)
+            if response.status_code == 200 and username in response.text:
+                logger.info("Cookies有效，无需重新登录")
+                return True
+            else:
+                logger.warning("Cookies无效，需要重新登录")
+                return False
+    else:
+        logger.info("未找到现有cookies，需要重新登录")
         return False
 
-    def search_and_download(self, search_url, items):
-        download_records = self.load_download_records()
-        
-        for item in items:
-            # 构建下载记录的键
-            preferred_resolution = item.get('分辨率', "")
-            fallback_resolution = self.config.get("resources", {}).get("fallback_resolution", "")
-            
-            # 尝试首选分辨率
-            record_key = self.build_record_key(item, preferred_resolution, "未知标题")
-            if record_key not in download_records:
-                logger.info(f"开始搜索: 剧集 {item['剧集']}, 分辨率 {preferred_resolution}, 集数 {item['集数']}")
-                self.driver.get(search_url)
-                search_box = WebDriverWait(self.driver, 10).until(
-                    EC.presence_of_element_located((By.ID, 'scform_srchtxt'))
-                )
-                search_box.send_keys(item['剧集'])
-                search_box.send_keys(Keys.RETURN)
-                logger.info("搜索请求发送完成")
-                logger.info("等待剧集结果")
-                time.sleep(5)  # 假设结果5秒内加载完成
+def login(session, username, password):
+    """执行登录操作"""
+    response = session.get(login_page_url)
+    if response.status_code != 200:
+        logger.error(f"获取登录页面失败，状态码: {response.status_code}")
+        return False
+    
+    soup = BeautifulSoup(response.text, 'html.parser')
+    formhash_tag = soup.find('input', {'name': 'formhash'})
+    if not formhash_tag or 'value' not in formhash_tag.attrs:
+        logger.error("未能找到formhash")
+        return False
+    
+    formhash = formhash_tag['value']
+    form_data = {
+        'formhash': formhash,
+        'referer': base_url,
+        'loginfield': 'username',
+        'username': username,
+        'password': password,
+        'questionid': '0',
+        'answer': '',
+        'cookietime': '2592000'
+    }
 
-                # 查找全集资源优先
-                full_set_found = self.find_full_set_resource(preferred_resolution, download_records, item)
-                if full_set_found:
-                    continue
-                
-                # 没有找到全集资源，按单集搜索
-                found_links = self.find_episode_links(self.driver.find_elements(By.TAG_NAME, 'li'), item, preferred_resolution)
-                if found_links:
-                    self.handle_single_episodes(found_links, item, preferred_resolution, download_records)
-                    continue
-                
-                # 没有找到首选分辨率的资源，尝试次级分辨率
-                logger.warning("未找到首选分辨率资源，尝试备选分辨率搜索")
-                self.search_with_fallback_resolution(item, search_url, download_records, preferred_resolution, fallback_resolution)
-            else:
-                logger.debug(f"记录已存在，跳过下载: {record_key}")
+    login_response = session.post(login_url, data=form_data)
+    if login_response.status_code == 200 and '欢迎您回来' in login_response.text:
+        logger.info("登录成功")
+        # 保存cookies到文件
+        with open('/tmp/tvshow_cookies.json', 'w') as file:
+            json.dump(requests.utils.dict_from_cookiejar(session.cookies), file)
+        return True
+    else:
+        logger.error(f"登录失败，状态码: {login_response.status_code}")
+        return False
 
-    def search_with_fallback_resolution(self, item, search_url, download_records, preferred_resolution, fallback_resolution):
-        record_key = self.build_record_key(item, fallback_resolution, "未知标题")
-        if record_key not in download_records:
-            logger.info(f"开始搜索: 剧集 {item['剧集']}, 分辨率 {fallback_resolution}, 集数 {item['集数']}")
-            self.driver.get(search_url)
-            search_box = WebDriverWait(self.driver, 10).until(
-                EC.presence_of_element_located((By.ID, 'scform_srchtxt'))
-            )
-            search_box.send_keys(item['剧集'])
-            search_box.send_keys(Keys.RETURN)
-            logger.info("搜索请求发送完成")
-            logger.info("等待剧集结果")
-            time.sleep(5)  # 假设结果5秒内加载完成
+def get_formhash(session, url):
+    """获取formhash"""
+    response = session.get(url)
+    if response.status_code != 200:
+        logger.error(f"获取formhash失败，状态码: {response.status_code}")
+        return None
+    
+    soup = BeautifulSoup(response.text, 'html.parser')
+    formhash_tag = soup.find('input', {'name': 'formhash'})
+    if not formhash_tag or 'value' not in formhash_tag.attrs:
+        logger.error("未能找到formhash")
+        return None
+    
+    return formhash_tag['value']
 
-            # 查找全集资源优先
-            full_set_found = self.find_full_set_resource(fallback_resolution, download_records, item)
-            if full_set_found:
-                return
-            
-            # 没有找到全集资源，按单集搜索
-            found_links = self.find_episode_links(self.driver.find_elements(By.TAG_NAME, 'li'), item, fallback_resolution)
-            if found_links:
-                self.handle_single_episodes(found_links, item, fallback_resolution, download_records)
-            else:
-                logger.warning("没有找到匹配的下载链接。")
-        else:
-            logger.debug(f"记录已存在，跳过下载: {record_key}")
+def perform_search(session, search_url, formhash, keyword):
+    """执行搜索操作"""
+    form_data = {
+        'formhash': formhash,
+        'srchtxt': keyword,
+        'searchsubmit': 'yes'
+    }
+    
+    search_response = session.post(search_url, data=form_data)
+    if search_response.status_code == 200:
+        return search_response.text
+    else:
+        logger.error(f"搜索请求失败，状态码: {search_response.status_code}")
+        return None
 
-    def handle_full_set(self, link, item, resolution, download_records):
-        # 处理全集资源的方法
-        self.driver.get(link)
-        WebDriverWait(self.driver, 10).until(EC.presence_of_element_located((By.CLASS_NAME, "plc")))
-        logger.debug("进入详情页面")
-        logger.info("找到匹配全集剧集结果，开始查找种子文件")
-        
-        # 构建记录键
-        record_key = self.build_record_key(item, resolution, "全集")
-        if record_key in download_records:
-            logger.info(f"记录已存在，跳过下载: {record_key}")
-            return
-        
-        try:
-            attachment_link = self.driver.find_element(By.PARTIAL_LINK_TEXT, "torrent")
-            attachment_url = attachment_link.get_attribute('href')
-            self.download_torrent(attachment_url, item, "全集", resolution, download_records)
-        except NoSuchElementException:
-            logger.warning("没有找到附件链接。")
+def parse_episode_range(range_str: str) -> Tuple[int, int, bool]:
+    """解析集数范围字符串，返回起始和结束集数以及是否为全集"""
+    range_str = range_str.strip().replace('第', '').replace('集', '')
+    
+    full_match = re.search(r"全(\d{1,2})集", range_str)
+    if full_match:
+        total_episodes = int(full_match.group(1))
+        return 1, total_episodes, True
+    
+    if '-' in range_str:
+        start, end = range_str.split('-')
+        return int(start), int(end), False
+    elif ',' in range_str:
+        episodes = [int(ep.strip()) for ep in range_str.split(',')]
+        return min(episodes), max(episodes), False
+    else:
+        return int(range_str), int(range_str), False
 
-    def handle_single_episodes(self, found_links, item, resolution, download_records):
-        # 处理单集资源的方法
-        if found_links:
-            # 只处理第一个匹配结果
-            first_link, first_title_text = found_links[0]
-            # 构建记录键
-            record_key = self.build_record_key(item, resolution, first_title_text)
-            if record_key in download_records:
-                logger.info(f"记录已存在，跳过下载: {record_key}")
-                return
-            self.driver.get(first_link)
-            WebDriverWait(self.driver, 10).until(EC.presence_of_element_located((By.CLASS_NAME, "plc")))
-            logger.debug("进入详情页面")
-            logger.info("找到匹配剧集结果，开始查找种子文件")
-            try:
-                attachment_link = self.driver.find_element(By.PARTIAL_LINK_TEXT, "torrent")
-                attachment_url = attachment_link.get_attribute('href')
-                self.download_torrent(attachment_url, item, first_title_text, resolution, download_records)
-            except NoSuchElementException:
-                logger.warning("没有找到附件链接。")
-        else:
-            logger.warning("没有找到匹配的下载链接。")
+def is_episode_in_range(episode: int, range_str: str) -> bool:
+    """检查指定集数是否在给定的集数范围内"""
+    start, end, _ = parse_episode_range(range_str)
+    return start <= episode <= end
 
-    def download_torrent(self, torrent_url, item, title_text, resolution, download_records):
-        self.driver.get(torrent_url)
-        logger.info("开始下载种子文件")
-        time.sleep(10)  # 设置等待时间为10秒，等待文件下载完成
-        self.send_notification(item, title_text, resolution)
-        
-        # 从标题中提取集数范围
-        episode_range = self.extract_episode_number(title_text)
-        
-        # 构建记录键
-        record_key = self.build_record_key(item, resolution, title_text)
-        if record_key not in download_records:
-            download_records.append(record_key)
-            self.save_download_records(download_records)
-            logger.info(f"下载记录更新完成: {record_key}")
-        else:
-            logger.info(f"记录已存在，跳过更新: {record_key}")
-        
-        # 尝试下载下一集
-        if episode_range is not None:
-            start_episode, end_episode = episode_range
-            next_episode_number = str(int(end_episode) + 1).zfill(2)
-            logger.info(f"尝试下载下一集：第{next_episode_number}集")
-            self.search_and_download_next_episode(item, next_episode_number, resolution)
+def should_exclude(result_title: str, exclude_keywords: List[str]) -> bool:
+    """检查标题是否包含任何排除关键字"""
+    return any(keyword.lower() in result_title.lower() for keyword in exclude_keywords)
 
-    def extract_episode_number(self, title_text):
-        # 正则表达式匹配集数或集数范围
-        episode_pattern = r"(?:第)?(\d{1,2})(?:-(\d{1,2}))?(?:集)?"
-        match = re.search(episode_pattern, title_text)
+def parse_file_size(size_str: str) -> float:
+    """将文件大小字符串转换为浮点数（以GB为单位）"""
+    size_str = size_str.strip().upper()
+    match = re.search(r'(\d+(\.\d+)?)\s*(GB|MB)', size_str)
+    if match:
+        size, unit = float(match.group(1)), match.group(3)
+        if unit == 'MB':
+            return size / 1024  # 将MB转换为GB
+        return size
+    return None
+
+def parse_search_results(html_content, title, episode_number, exclude_keywords, preferred_resolution, fallback_resolution):
+    """解析搜索结果，并根据集数范围及分辨率情况进行匹配，返回所有符合条件的链接"""
+    soup = BeautifulSoup(html_content, 'html.parser')
+    results = []
+
+    for li in soup.find_all('li', class_='pbw'):
+        h3 = li.find('h3', class_='xs3')
+        if not h3 or not h3.find('a'):
+            continue
         
+        a_tag = h3.find('a')
+        link = a_tag['href']
+        result_title = a_tag.get_text(strip=True)
+        
+        if title.lower() not in result_title.lower() or should_exclude(result_title, exclude_keywords):
+            continue
+        
+        match = re.search(r"(?:第(\d{1,2}-\d{1,2}|\d{1,2},\d{1,2}|\d{1,2})集|全(\d{1,2})集)", result_title)
         if match:
-            start_episode = match.group(1)
-            end_episode = match.group(2) or start_episode
-            
-            # 返回集数范围的元组
-            return (start_episode, end_episode)
-        else:
-            logger.error("无法从标题中提取集数")
-            return None
-
-    def search_and_download_next_episode(self, item, next_episode_number, resolution):
-        search_url = self.config.get("urls", {}).get("tv_search_url", "")
-        search_term = f"{item['剧集']}"
-        self.driver.get(search_url)
-        search_box = WebDriverWait(self.driver, 10).until(
-            EC.presence_of_element_located((By.ID, 'scform_srchtxt'))
-        )
-        search_box.send_keys(search_term)
-        search_box.send_keys(Keys.RETURN)
-        logger.info("搜索请求发送完成")
-        logger.info("等待剧集结果")
-        time.sleep(5)  # 假设结果5秒内加载完成
-        
-        # 查找符合的资源
-        list_items = self.driver.find_elements(By.TAG_NAME, 'li')
-        found_links = []
-        exclude_keywords = self.config.get("resources", {}).get("exclude_keywords", "")
-        exclude_keywords = [keyword.strip() for keyword in exclude_keywords.split(',')]
-        
-        for li in list_items:
-            try:
-                a_element = li.find_element(By.TAG_NAME, 'a')
-                title_text = a_element.text.lower()
-
-                # 检查是否需要排除此条目
-                if any(keyword in title_text for keyword in exclude_keywords):
+            if match.group(2):
+                # 全集资源
+                file_size_str = result_title.split()[-1]
+                file_size = parse_file_size(file_size_str)
+                if file_size is not None:
+                    results.append({
+                        'link': link, 
+                        'title': result_title, 
+                        'file_size': file_size,
+                        'episode_range': (1, int(match.group(2)))  # 记录全集范围
+                    })
                     continue
+            
+            range_str = match.group(1)
+            start, end, _ = parse_episode_range(range_str)
+            if is_episode_in_range(int(episode_number), range_str):
+                file_size_str = result_title.split()[-1]
+                file_size = parse_file_size(file_size_str)
+                if file_size is not None:
+                    results.append({
+                        'link': link, 
+                        'title': result_title, 
+                        'file_size': file_size,
+                        'episode_range': (start, end)  # 记录多集范围
+                    })
+                    continue
+        elif f"第{episode_number}集" in result_title:
+            file_size_str = result_title.split()[-1]
+            file_size = parse_file_size(file_size_str)
+            if file_size is not None:
+                results.append({
+                    'link': link, 
+                    'title': result_title, 
+                    'file_size': file_size,
+                    'episode_range': (int(episode_number), int(episode_number))  # 单集
+                })
 
-                # 匹配精确集数
-                exact_match = f"[第{next_episode_number}集]" in title_text
-                # 匹配集数范围
-                range_match = f"[第{next_episode_number}-" in title_text
-                if resolution.lower() in title_text and (exact_match or range_match):
-                    link = a_element.get_attribute('href')
-                    found_links.append((link, title_text))
-                    logger.info(f"发现: {title_text}, Link: {link}")
-            except NoSuchElementException:
-                logger.warning("未找到搜索结果元素")
-                continue
+    # 筛选符合分辨率要求的结果
+    preferred_results = []
+    fallback_results = []
 
-        if found_links:
-            # 只处理第一个匹配结果
-            first_link, first_title_text = found_links[0]
-            # 更新记录键为实际的标题
-            record_key = self.build_record_key(item, resolution, first_title_text)
-            download_records = self.load_download_records()
-            if record_key in download_records:
-                logger.info(f"记录已存在，跳过下载: {record_key}")
-                return
-            self.driver.get(first_link)
-            WebDriverWait(self.driver, 10).until(EC.presence_of_element_located((By.CLASS_NAME, "plc")))
-            logger.debug("进入详情页面")
-            logger.info("找到匹配剧集结果，开始查找种子文件")
-            try:
-                attachment_link = self.driver.find_element(By.PARTIAL_LINK_TEXT, "torrent")
-                attachment_url = attachment_link.get_attribute('href')
-                self.download_torrent(attachment_url, item, first_title_text, resolution, download_records)
-            except NoSuchElementException:
-                logger.warning("没有找到附件链接。")
+    for result in results:
+        if preferred_resolution and preferred_resolution.lower() in result['title'].lower():
+            preferred_results.append(result)
+        elif fallback_resolution and fallback_resolution.lower() in result['title'].lower():
+            fallback_results.append(result)
+
+    # 如果没有找到符合首选分辨率的结果，则尝试匹配备用分辨率
+    if not preferred_results:
+        logger.info(f"未匹配到首选分辨率结果，使用备用分辨率进行匹配")
+    else:
+        logger.info(f"已匹配到首选分辨率结果")
+
+    # 返回结果时优先返回首选分辨率的结果，如果没有则返回备用分辨率的结果
+    return preferred_results if preferred_results else fallback_results
+    
+def get_and_parse_link(session, link, title, base_url):
+    """发送GET请求并解析选定链接的内容，确保所有链接都是完整URL，并提取下载链接"""
+    try:
+        response = session.get(link)
+        if response.status_code != 200:
+            logger.error(f"解析链接失败，状态码: {response.status_code}")
+            return None, []
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # 提取并补全所有<a>标签中的href属性
+        for a_tag in soup.find_all('a', href=True):
+            if not a_tag['href'].startswith('http'):
+                a_tag['href'] = urljoin(base_url, a_tag['href'])
+        
+        # 提取下载链接
+        download_links = [
+            {'link': a_tag['href'], 'text': a_tag.get_text(strip=True).lower()}
+            for a_tag in soup.find_all('a', href=True, target='_blank')
+            if '.torrent' in a_tag.get_text(strip=True).lower() or 'download' in a_tag.get_text(strip=True).lower()
+        ]
+        
+        return str(soup), download_links
+    except requests.RequestException as e:
+        logger.error(f"解析链接时发生请求异常: {e}")
+        return None, []
+
+def download_file(session, download_link, filename, selected_title, download_dir='/Torrent'):
+    """下载文件到指定的下载目录"""
+    # 确保下载目录存在，如果不存在则创建
+    if not os.path.exists(download_dir):
+        os.makedirs(download_dir)
+        logger.info(f"创建下载目录: {download_dir}")
+
+    # 构建完整的文件路径
+    full_path = os.path.join(download_dir, filename)
+
+    try:
+        response = session.get(download_link, stream=True)
+        if response.status_code != 200:
+            logger.error(f"下载文件失败，状态码: {response.status_code}")
+            return False
+        
+        with open(full_path, 'wb') as file:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:  # 检查chunk是否非空
+                    file.write(chunk)
+        logger.debug(f"文件下载成功: {full_path}")
+        return True
+    except requests.RequestException as e:
+        logger.error(f"下载文件时发生请求异常: {e}")
+        return False
+
+def download_tv_series(tv_info, formhash):
+    """下载指定剧集，并尝试连续下载下一集"""
+    title = tv_info['剧集']
+    missing_episodes = set(tv_info['missing_episodes'])  # 使用集合来存储缺失的集数，方便后续操作
+    current_episode = min(missing_episodes) if missing_episodes else 1
+    formatted_episode_number = f'{"0" if current_episode < 10 else ""}{current_episode}'
+    
+    while missing_episodes:  # 只要还有缺失的集数就继续下载
+        logger.info(f"正在搜索: {title} 第{formatted_episode_number}集")
+        search_result_html = perform_search(session, search_url, formhash, title)  # 只使用标题进行搜索
+        if not search_result_html:
+            logger.warning(f"未找到 {title} 的搜索结果，跳过该电视节目")
+            break
+
+        parsed_results = parse_search_results(
+            search_result_html, 
+            title, 
+            formatted_episode_number, 
+            exclude_keywords, 
+            preferred_resolution, 
+            fallback_resolution
+        )
+        if not parsed_results:
+            logger.warning(f"未找到 {title} 第{formatted_episode_number}集的任何匹配结果，跳过该电视节目")
+            break
+
+        # 选择最合适的资源（优先选择包含更多集数的资源）
+        selected_result = max(parsed_results, key=lambda x: x['episode_range'][1] - x['episode_range'][0])
+        start_episode, end_episode = selected_result['episode_range']
+        
+        logger.debug(f"选择链接: {selected_result['title']}, 文件大小: {selected_result['file_size']:.2f} GB")
+        
+        absolute_link = urljoin(base_url, selected_result['link'])
+        parsed_link_content, download_links = get_and_parse_link(session, absolute_link, title, base_url)
+        if parsed_link_content and download_links:
+            chosen_download_link = download_links[0]
+            logger.debug(f"选择下载链接: {chosen_download_link['link']}, 文件名: {chosen_download_link['text']}")
+            if download_file(session, chosen_download_link['link'], chosen_download_link['text'], selected_result['title']):
+                if start_episode == end_episode:
+                    logger.info(f"{title} 第{start_episode}集下载成功")
+                else:
+                    logger.info(f"{title} 第{start_episode}集至第{end_episode}集下载成功")
+
+                # 更新缺失集数列表，移除已下载的集数
+                for ep in range(start_episode, end_episode + 1):
+                    if ep in missing_episodes:
+                        missing_episodes.remove(ep)
+
+                # 如果还有缺失的集数，尝试下载下一集
+                if missing_episodes:
+                    current_episode = min(missing_episodes)
+                    formatted_episode_number = f'{"0" if current_episode < 10 else ""}{current_episode}'
+                else:
+                    logger.info(f"{title} 全{end_episode}集下载成功")
+                    break
+            else:
+                logger.error(f"{title} 第{formatted_episode_number}集下载失败")
+                break
         else:
-            logger.warning("没有找到匹配的下载链接。")
+            logger.error("解析链接内容或下载链接失败")
+            break
 
-    def send_notification(self, item, title_text, resolution):
-        api_key = self.config.get("notification", {}).get("notification_api_key", "")
-        if not api_key:
-            logger.error("通知API Key未在配置文件中找到，无法发送通知。")
+    if not missing_episodes:
+        logger.info(f"{title} 所有缺失集数已下载完成")
+
+def main():
+    extractor = TVInfoExtractor(db_path, config)
+    tv_info_list = extractor.extract_tv_info()
+
+    if not load_and_check_cookies(session, user_profile_url):
+        if not login(session, username, password):
+            logger.error("登录失败，程序终止")
             return
-        api_url = f"https://api.day.app/{api_key}"
-        data = {
-            "title": "下载通知",
-            "body": f"{item['剧集']} - {resolution} - {title_text}"  # 使用 title_text 作为 body 内容
-        }
-        headers = {'Content-Type': 'application/json'}
-        response = requests.post(api_url, data=json.dumps(data), headers=headers)
-        if response.status_code == 200:
-            logger.info("通知发送成功: %s", response.text)
-        else:
-            logger.error("通知发送失败: %s %s", response.status_code, response.text)
+    
+    formhash = get_formhash(session, login_page_url)
+    if not formhash:
+        logger.error("无法继续，因为没有获取到formhash")
+        return
 
-    def run(self):
+    for tv_info in tv_info_list:
+        download_tv_series(tv_info, formhash)
 
-        # 加载配置文件
-        self.load_config()
-        
-        # 检查配置文件中的必要信息是否存在
-        if not self.config.get("resources", {}).get("login_username") or \
-           not self.config.get("resources", {}).get("login_password") or \
-           not self.config.get("notification", {}).get("notification_api_key"):
-            logger.error("请编辑配置文件 %s 并填写正确的用户名、密码及API key等参数。", self.config_path)
-            exit(1)  # 提示后立即退出程序
-
-        # 初始化WebDriver
-        self.setup_webdriver()
-        
-        # 提取电视节目信息
-        all_tv_info = self.extract_tv_info()
-
-        # 登录操作
-        login_url = self.config.get("urls", {}).get("tv_login_url", "")
-        self.login(login_url, self.config["resources"]["login_username"], self.config["resources"]["login_password"])
-
-        # 搜索和下载操作
-        search_url = self.config.get("urls", {}).get("tv_search_url", "")
-        self.search_and_download(search_url, all_tv_info)
-
-        # 清理工作，关闭浏览器
-        self.driver.quit()
-        logger.info("WebDriver关闭完成")
-
-if __name__ == "__main__":
-    downloader = TVDownloader(config_path='/config/config.ini')
-    downloader.run()
+if __name__ == '__main__':
+    main()

@@ -62,10 +62,8 @@ fallback_resolution = 1080p
 exclude_keywords = 60帧,高码版
 
 [urls]
-movie_login_url = https://100.tudoutudou.top/member.php?mod=logging&action=login
-tv_login_url = https://200.tudoutudou.top/member.php?mod=logging&action=login
-movie_search_url = https://100.tudoutudou.top/search.php?mod=forum
-tv_search_url = https://200.tudoutudou.top/search.php?mod=forum
+tv_url = https://200.tudoutudou.top
+movie_url = https://100.tudoutudou.top
 
 [running]
 run_interval_hours = 6
