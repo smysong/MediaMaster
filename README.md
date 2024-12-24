@@ -307,6 +307,11 @@ movie_login_url = https://100.tudoutudou.top/member.php?mod=logging&action=login
 tv_login_url = https://200.tudoutudou.top/member.php?mod=logging&action=login #高清剧集网登录地址
 movie_search_url = https://100.tudoutudou.top/search.php?mod=forum #高清影视之家搜索地址
 tv_search_url = https://200.tudoutudou.top/search.php?mod=forum #高清剧集网搜索地址
+----------------------最新版本仅需以下两个url----------------------
+[urls]
+tv_url = https://200.tudoutudou.top     #高清剧集网最新域名
+movie_url = https://100.tudoutudou.top  #高清影视之家最新域名
+--------------------------------------------------------------------
 
 [running]
 run_interval_hours = 6 #程序自动运行间隔时长，默认6小时
