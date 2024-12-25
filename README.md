@@ -37,7 +37,7 @@ WEB管理信息：
 > 默认用户名：admin \
 > 默认密码：P@ssw0rd
 
-**（单独部署）mediamaster docker-compose.yml 如下：**
+**（单独部署） docker-compose.yml 如下：**
 ```
 version: '3.8'
 services:
