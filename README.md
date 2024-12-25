@@ -29,7 +29,7 @@
 
 ## 快速开始
 
-### 推荐使用Docker Compose部署：
+### 使用Docker Compose部署：
 请替换volumes路径为实际路径。docker.cloudlayer.icu是docker镜像代理拉取地址，可以去除或更改为其他代理地址。
 WEB管理信息：
 > 默认端口：8888 \
