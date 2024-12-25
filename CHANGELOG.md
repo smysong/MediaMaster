@@ -102,4 +102,4 @@
 ### 修复
 - 修复WEB管理界面：在库的电影和剧集无数据时程序异常崩溃的情况；完善部分消息提示功能。
 
-[1.7.0]: https://github.com/smysong/mediamaster/releases/tag/v1.7.0
+[1.7.0]: https://github.com/smysong/mediamaster/releases/tag/1.7.0
