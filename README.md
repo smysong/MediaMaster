@@ -23,6 +23,10 @@
 
 本项目采用 [MIT License](LICENSE) 许可证。详情请参阅 [LICENSE](LICENSE) 文件。
 
+## Docker 仓库地址
+
+本项目Docker仓库： https://hub.docker.com/r/smysong/mediamaster
+
 ## 快速开始
 
 ### 推荐使用Docker Compose部署：
